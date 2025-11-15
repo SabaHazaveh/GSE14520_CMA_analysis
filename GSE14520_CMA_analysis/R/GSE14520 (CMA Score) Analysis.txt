@@ -1,0 +1,535 @@
+# Part 1: 01_Ctrl_vs_HCC_CMA_score
+# Description: CMA score analysis (Control vs HCC) using GSE14520 (GPL3921)
+
+# Packages 
+library(GEOquery)
+library(matrixStats)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+
+# Load GEO series GSE14520 
+GSE14520 <- getGEO("GSE14520", GSEMatrix = TRUE, AnnotGPL = TRUE)
+
+# Extract the GPL3921 expression set
+GPL3921 <- GSE14520[[grep("GPL3921", names(GSE14520))]]
+
+# Sample info
+eset  <- GPL3921
+pheno <- pData(eset)
+
+# characteristics/source/title columns 
+ph_txt <- apply(
+  pheno[, grep("characteristics|source_name|title", colnames(pheno), ignore.case = TRUE), drop = FALSE],
+  1, function(x) paste(na.omit(x), collapse = "; ")
+)
+
+# Label groups (Control = non-tumor; HCC = tumor)
+grp <- ifelse(
+  grepl("non[ -]?tumou?r|non[ -]?tumor|adjacent|noncancer|non cancer|normal", ph_txt, ignore.case = TRUE), 
+  "Control",
+  ifelse(grepl("tumou?r", ph_txt, ignore.case = TRUE), "HCC", NA)
+)
+
+# Attach sample IDs as names on grp
+names(grp) <- rownames(pheno)
+
+# Check group distribution and drop unclassified samples
+table(grp, useNA = "ifany")
+sel   <- !is.na(grp)
+grp   <- grp[sel]
+pheno <- pheno[sel, , drop = FALSE]
+
+# ExpressionSet for GPL3921
+eset          <- GPL3921
+exprs_mat     <- exprs(eset)
+feature_annot <- fData(eset)
+
+# Use "Gene symbol" column
+symbol_col <- "Gene symbol"
+
+# Extract and clean symbols
+gene_symbols <- feature_annot[[symbol_col]]
+gene_symbols <- ifelse(is.na(gene_symbols), "", gene_symbols)
+gene_symbols <- sapply(
+  strsplit(gene_symbols, "///|;|\\s?//\\s?|\\|"),
+  function(x) trimws(x[1])
+)
+
+# Filter invalid probes
+valid_idx   <- !(is.na(gene_symbols) | gene_symbols == "" | gene_symbols %in% c("---", "—", "-"))
+exprs_valid <- exprs_mat[valid_idx, , drop = FALSE]
+gene_symbols <- gene_symbols[valid_idx]
+
+stopifnot(nrow(exprs_valid) == length(gene_symbols))
+
+# Collapse probes → genes (median)
+exprs_df       <- as.data.frame(exprs_valid)
+exprs_df$Gene  <- gene_symbols
+exprs_genelevel <- aggregate(. ~ Gene, data = exprs_df, FUN = median)
+
+rownames(exprs_genelevel) <- exprs_genelevel$Gene
+exprs_genelevel$Gene      <- NULL
+exprs_genelevel           <- as.matrix(exprs_genelevel)
+
+# Align to filtered sample columns
+exprs_genelevel <- exprs_genelevel[, names(grp), drop = FALSE]
+stopifnot(identical(colnames(exprs_genelevel), names(grp)))
+
+# Group factor
+group <- factor(grp, levels = c("Control", "HCC"))
+table(group)
+
+# CMA panel
+cma_panel <- tibble::tribble(
+  ~Gene,      ~Direction, ~Weight,
+  "LAMP2",    1,           2,
+  "HSPA8",    1,           1,
+  "HSP90AA1", 1,           1,
+  "HSP90AB1", 1,           1,
+  "DNAJB1",   1,           1,
+  "GFAP",     1,           1,
+  "EEF1A1",   1,           1,
+  "PHLPP1",   1,           1,
+  "RAC1",     1,           1,
+  "RICTOR",  -1,           1,
+  "AKT1",    -1,           1,
+  "AKT2",    -1,           1,
+  "CTSA",    -1,           1,
+  "NFATC1",   1,           1,
+  "NCOR1",    1,           1,
+  "NFE2L2",   1,           1,
+  "RAB11A",   1,           1,
+  "RARA",    -1,           1
+)
+
+# Keep present genes only
+present_genes <- intersect(cma_panel$Gene, rownames(exprs_genelevel))
+cma_panel     <- dplyr::filter(cma_panel, Gene %in% present_genes)
+
+exprs_cma <- exprs_genelevel[cma_panel$Gene, , drop = FALSE]
+
+# Z-score per gene
+exprs_cma_z <- t(scale(t(exprs_cma)))
+
+# Apply direction + weight
+exprs_cma_adj <- sweep(exprs_cma_z, 1, cma_panel$Direction, `*`)
+exprs_cma_adj <- sweep(exprs_cma_adj, 1, cma_panel$Weight,    `*`)
+
+# CMA score
+total_weight <- sum(cma_panel$Weight)
+cma_score    <- colSums(exprs_cma_adj, na.rm = TRUE) / total_weight
+
+cma_df <- tibble::tibble(
+  Sample    = colnames(exprs_cma_adj),
+  Group     = factor(grp, levels = c("Control", "HCC")),
+  CMA_score = as.numeric(cma_score)
+)
+
+# Stats
+wilcox.test(CMA_score ~ Group, data = cma_df, exact = FALSE)
+
+# Boxplot
+ggplot(cma_df, aes(x = Group, y = CMA_score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.5, size = 1.3) +
+  labs(y = "CMA score (weighted z)", title = "CMA score: HCC vs Control") +
+  theme_classic()
+
+# Save ordered table
+cma_df_ordered <- cma_df[order(cma_df$Group), ]
+write.csv(cma_df_ordered, "CMA_scores_HCC_vs_Control_ordered.csv", row.names = FALSE)
+
+# Heatmap ordering
+eff_genes   <- c("LAMP2", "HSPA8", "HSP90AA1", "HSP90AB1", "DNAJB1")
+lyso_genes  <- c("GFAP", "EEF1A1", "PHLPP1", "RAC1", "RICTOR", "AKT1", "AKT2", "CTSA")
+extra_genes <- c("NFATC1", "NCOR1", "NFE2L2", "RAB11A", "RARA")
+
+ordered_genes <- intersect(c(eff_genes, lyso_genes, extra_genes), rownames(exprs_cma_z))
+exprs_cma_z   <- exprs_cma_z[ordered_genes, , drop = FALSE]
+
+# Sample order for heatmap
+ord        <- order(group)
+exprs_cma_z <- exprs_cma_z[, ord, drop = FALSE]
+group_ord   <- droplevels(group[ord])
+
+ann_col <- data.frame(Group = group_ord)
+rownames(ann_col) <- colnames(exprs_cma_z)
+
+# Heatmap
+pheatmap(
+  exprs_cma_z,
+  cluster_rows   = FALSE,
+  cluster_cols   = FALSE,
+  annotation_col = ann_col,
+  show_colnames  = FALSE,
+  main           = "CMA genes (Effectors → Lysosomal → Extra-lysosomal)"
+)
+
+# Save heatmap matrix
+write.csv(exprs_cma_z, "CMA_heatmap_values_for_Prism.csv", row.names = TRUE)
+
+# Part 2: 02_Tumor_Size
+# Description: CMA score analysis stratified by tumor size (Control, small, large) and differential expression of LAMP2 and STAG2 in control vs small tumors using GSE14520 (GPL3921).
+
+# Patient demographics Excel
+library(readxl)
+demo <- read_excel("data/GSE14520_Extra_Supplement_patients_demographics.xlsx")
+
+demo_clean <- demo %>%
+  transmute(
+    GSM = as.character(`Affy_GSM`),
+    TumorSize = tolower(`Main Tumor Size (>/<=5 cm)`)  # "small" / "large"
+  )
+
+gsm_ids <- colnames(exprs_genelevel)
+size_map <- demo_clean$TumorSize[match(gsm_ids, demo_clean$GSM)]
+
+# Stratify by: Control, Small, Large
+group3 <- ifelse(group == "Control", "Control",
+                 ifelse(size_map == "small", "Small",
+                        ifelse(size_map == "large", "Large", NA)))
+
+table(group3, useNA = "ifany")
+
+# CMA components
+present <- intersect(cma_panel$Gene, rownames(exprs_genelevel))
+cma_panel_use <- dplyr::filter(cma_panel, Gene %in% present)
+
+exprs_cma <- exprs_genelevel[cma_panel_use$Gene, , drop = FALSE]
+
+# Z-score by gene (row-wise)
+exprs_cma_z <- t(scale(t(exprs_cma)))
+
+# Apply direction + weight
+exprs_cma_adj <- sweep(exprs_cma_z, 1, cma_panel_use$Direction, `*`)
+exprs_cma_adj <- sweep(exprs_cma_adj, 1, cma_panel_use$Weight,    `*`)
+
+# CMA score per sample
+total_weight <- sum(cma_panel_use$Weight)
+cma_score3 <- colSums(exprs_cma_adj, na.rm = TRUE) / total_weight
+
+# Stratify CMA score by tumor size
+cma_df3 <- data.frame(
+  Sample    = colnames(exprs_cma_adj),
+  Group     = factor(group3, levels = c("Control","Small","Large")),
+  CMA_score = as.numeric(cma_score3)
+)
+cma_df3 <- subset(cma_df3, !is.na(Group))  # drop NAs
+
+# Reorder columns by group
+ord <- order(cma_df3$Group)
+exprs_cma_z_ord <- exprs_cma_z[, cma_df3$Sample[ord], drop = FALSE]
+
+# Category row order
+eff_genes   <- c("LAMP2","HSPA8","HSP90AA1","HSP90AB1","DNAJB1")
+lyso_genes  <- c("GFAP","EEF1A1","PHLPP1","RAC1","RICTOR","AKT1","AKT2","CTSA")
+extra_genes <- c("NFATC1","NCOR1","NFE2L2","RAB11A","RARA")
+ordered_genes <- intersect(c(eff_genes, lyso_genes, extra_genes), rownames(exprs_cma_z_ord))
+exprs_cma_z_ord <- exprs_cma_z_ord[ordered_genes, , drop = FALSE]
+
+ann_col <- data.frame(Group = cma_df3$Group[ord])
+rownames(ann_col) <- colnames(exprs_cma_z_ord)
+
+# Heatmap: CMA genes by tumor size
+pheatmap(exprs_cma_z_ord,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         annotation_col = ann_col,
+         show_colnames = FALSE,
+         main = "CMA genes by tumor size (Control, Small ≤5cm, Large >5cm)")
+
+# CMA scores table
+write.csv(cma_df3[order(cma_df3$Group), ],
+          "CMA_scores_Control_Small_Large.csv", row.names = FALSE)
+
+# Heatmap z-scores matrix 
+write.csv(exprs_cma_z_ord,
+          "CMA_heatmap_values_Control_Small_Large.csv", row.names = TRUE)
+
+# LAMP2 / STAG2 expression (aligned with filtered samples)
+
+# Ensure probe-level matrix uses the same sample set as the gene-level matrix
+exprs_valid <- exprs_valid[, colnames(exprs_genelevel), drop = FALSE]
+stopifnot(identical(colnames(exprs_valid), colnames(exprs_genelevel)))
+
+# Compare Control vs Small tumors for STAG2 & LAMP2 levels (fold change)
+
+lamp2_probes <- c("200821_at", "203042_at")
+stag2_probes <- c("207983_s_at", "209022_at", "209023_s_at")
+
+# Median of probes
+collapse_probes <- function(probes) {
+  present <- probes[probes %in% rownames(exprs_valid)]
+  if (length(present) == 0) return(NULL)
+  expr_mat <- exprs_valid[present, , drop = FALSE]
+  colMedians(expr_mat, na.rm = TRUE)
+}
+
+lamp2_vals <- collapse_probes(lamp2_probes)
+stag2_vals <- collapse_probes(stag2_probes)
+
+# Combine into data frame
+gene_df <- data.frame(
+  Sample = colnames(exprs_valid),
+  Group3 = group3,
+  LAMP2  = lamp2_vals,
+  STAG2  = stag2_vals,
+  stringsAsFactors = FALSE
+)
+
+# Keep only Control and Small tumor and drop NAs
+gene_df2 <- subset(gene_df, Group3 %in% c("Control", "Small"))
+gene_df2$Group3 <- factor(gene_df2$Group3, levels = c("Control", "Small"))
+
+# Order samples: all Control first, then Small tumors
+ord <- order(gene_df2$Group3)
+gene_df2 <- gene_df2[ord, ]
+
+# Wilcoxon tests
+wilcox.test(LAMP2 ~ Group3, data = gene_df2)
+wilcox.test(STAG2 ~ Group3, data = gene_df2)
+
+# Boxplots 
+library(ggplot2)
+gene_df2_long <- tidyr::pivot_longer(
+  gene_df2, cols = c(LAMP2, STAG2),
+  names_to = "Gene", values_to = "Expression"
+)
+
+ggplot(gene_df2_long, aes(x = Group3, y = Expression, fill = Group3)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.5, size = 1.2) +
+  facet_wrap(~Gene, scales = "free_y") +
+  labs(y = "log2 expression (median probes)",
+       title = "Control vs Small HCC (STAG2, LAMP2)") +
+  theme_classic(base_size = 12) +
+  guides(fill = "none")
+
+# Normalize to non-tumor Control mean (Δlog2)
+for (g in c("LAMP2", "STAG2")) {
+  ctrl_mean <- mean(gene_df2[[g]][gene_df2$Group3 == "Control"], na.rm = TRUE)
+  gene_df2[[paste0(g, "_log2FC")]] <- gene_df2[[g]] - ctrl_mean
+  gene_df2[[paste0(g, "_foldchange")]] <- 2^(gene_df2[[paste0(g, "_log2FC")]])  # back to linear fold
+}
+write.csv(gene_df2, "STAG2_LAMP2_Control_vs_Small_FC.csv", row.names = FALSE)
+
+# Part 3: 03_Male_vs_female_CMA_Score
+# Description: Sex-stratified CMA score analysis using the GSE14520 (GPL3921).
+
+# LCS ID and Sex (from demographics)
+library(readxl)
+library(stringr)
+library(dplyr)
+
+demo <- read_excel("data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
+                   col_types = "text")
+
+lcs2sex <- demo %>%
+  transmute(
+    LCS = paste0("LCS_", str_extract(`LCS ID`, "\\d+")),
+    Sex = toupper(Gender)  # "M" / "F"
+  )
+
+# Extract LCS 
+if (!exists("ph_txt")) {
+  txtcols <- grep("characteristics|source_name|title", colnames(pheno), ignore.case = TRUE, value = TRUE)
+  ph_txt <- apply(pheno[, txtcols, drop = FALSE], 1, function(x) paste(na.omit(x), collapse = "; "))
+}
+
+lcs_token <- stringr::str_extract(ph_txt, "LCS[ _-]?\\d+[A-B]?")  # e.g., "LCS_193A"
+lcs_norm  <- ifelse(is.na(lcs_token), NA, paste0("LCS_", stringr::str_extract(lcs_token, "\\d+")))
+
+sex_map <- lcs2sex$Sex[ match(lcs_norm, lcs2sex$LCS) ]  # "M"/"F" for ALL samples (tumor & control)
+
+table(sex_map, useNA="ifany")
+
+# Combine group (Control / HCC) with sex
+group_sex_full <- ifelse(group == "Control",
+                         ifelse(sex_map == "F", "Control_F", "Control_M"),
+                         ifelse(sex_map == "F", "HCC_F", "HCC_M"))
+
+table(group_sex_full, useNA="ifany")
+
+# CMA genes 
+#z score and direction + weight 
+present       <- intersect(cma_panel$Gene, rownames(exprs_genelevel))
+cma_panel_use <- dplyr::filter(cma_panel, Gene %in% present)
+
+exprs_cma     <- exprs_genelevel[cma_panel_use$Gene, , drop = FALSE]
+exprs_cma_z   <- t(scale(t(exprs_cma)))
+exprs_cma_adj <- sweep(sweep(exprs_cma_z, 1, cma_panel_use$Direction, `*`), 1, cma_panel_use$Weight, `*`)
+cma_score_all <- colSums(exprs_cma_adj, na.rm = TRUE) / sum(cma_panel_use$Weight)
+
+# Category row order for heatmaps
+eff_genes   <- c("LAMP2","HSPA8","HSP90AA1","HSP90AB1","DNAJB1")
+lyso_genes  <- c("GFAP","EEF1A1","PHLPP1","RAC1","RICTOR","AKT1","AKT2","CTSA")
+extra_genes <- c("NFATC1","NCOR1","NFE2L2","RAB11A","RARA")
+row_order   <- intersect(c(eff_genes, lyso_genes, extra_genes), rownames(exprs_cma_z))
+
+female_idx <- group_sex_full %in% c("Control_F","HCC_F")
+grp_f      <- factor(group_sex_full[female_idx], levels = c("Control_F","HCC_F"))
+
+cma_df_f <- data.frame(
+  Sample    = colnames(exprs_cma_adj)[female_idx],
+  Group     = grp_f,
+  CMA_score = cma_score_all[female_idx]
+)
+
+# Stats + plot
+wilcox.test(CMA_score ~ Group, data = cma_df_f, exact = FALSE)
+library(ggplot2)
+ggplot(cma_df_f, aes(Group, CMA_score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.5) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  labs(title = "CMA score: Female HCC vs Female Control", y = "CMA score (weighted z)", x = NULL) +
+  theme_classic(base_size = 12) + theme(legend.position = "none")
+
+# Heatmap (Control_F vs HCC_F and Control_M vs HCC_M)
+exprs_f <- exprs_cma_z[row_order, female_idx, drop = FALSE][, order(grp_f), drop = FALSE]
+ann_f   <- data.frame(Group = grp_f[order(grp_f)]); rownames(ann_f) <- colnames(exprs_f)
+pheatmap(exprs_f, cluster_rows = FALSE, cluster_cols = FALSE,
+         annotation_col = ann_f, show_colnames = FALSE,
+         main = "CMA genes: Female Control vs Female HCC")
+
+# Prism exports
+write.csv(cma_df_f[order(cma_df_f$Group), ], "CMA_scores_Female_Control_vs_HCC.csv", row.names = FALSE)
+write.csv(exprs_f, "CMA_heatmap_values_Female_Control_vs_HCC.csv", row.names = TRUE)
+
+male_idx <- group_sex_full %in% c("Control_M","HCC_M")
+grp_m    <- factor(group_sex_full[male_idx], levels = c("Control_M","HCC_M"))
+
+cma_df_m <- data.frame(
+  Sample    = colnames(exprs_cma_adj)[male_idx],
+  Group     = grp_m,
+  CMA_score = cma_score_all[male_idx]
+)
+
+wilcox.test(CMA_score ~ Group, data = cma_df_m, exact = FALSE)
+ggplot(cma_df_m, aes(Group, CMA_score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.5) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  labs(title = "CMA score: Male HCC vs Male Control", y = "CMA score (weighted z)", x = NULL) +
+  theme_classic(base_size = 12) + theme(legend.position = "none")
+
+exprs_m <- exprs_cma_z[row_order, male_idx, drop = FALSE][, order(grp_m), drop = FALSE]
+ann_m   <- data.frame(Group = grp_m[order(grp_m)]); rownames(ann_m) <- colnames(exprs_m)
+pheatmap(exprs_m, cluster_rows = FALSE, cluster_cols = FALSE,
+         annotation_col = ann_m, show_colnames = FALSE,
+         main = "CMA genes: Male Control vs Male HCC")
+
+write.csv(cma_df_m[order(cma_df_m$Group), ], "CMA_scores_Male_Control_vs_HCC.csv", row.names = FALSE)
+write.csv(exprs_m, "CMA_heatmap_values_Male_Control_vs_HCC.csv", row.names = TRUE)
+
+# Part 4: 04_Survival_CMA
+# Description: Overall survival analysis stratified by CMA score (High vs. low) in HCC patients using GSE14520 (GPL3921).
+
+library(readxl)
+library(dplyr)
+library(survival)
+library(survminer)
+
+
+# Load demographics (overall survival metadata)
+demo <- read_excel(
+  "data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
+  col_types = "text"
+)
+
+samples <- colnames(exprs_genelevel)
+is_hcc  <- group == "HCC"   # HCC tumor samples
+
+# Map OS to samples
+time_os  <- as.numeric(demo$`Survival months`[match(samples, demo$`Affy_GSM`)])
+event_os <- as.numeric(demo$`Survival status`[match(samples, demo$`Affy_GSM`)])
+
+# 1) Overall HCC: CMA (High vs Low) and OS
+# cma_df has: Sample | Group | CMA_score
+stopifnot(exists("cma_df"))
+
+os_hcc <- data.frame(
+  Sample      = samples[is_hcc],
+  time_months = time_os[is_hcc],
+  event       = event_os[is_hcc],
+  CMA_score   = cma_df$CMA_score[match(samples[is_hcc], cma_df$Sample)]
+) |>
+  na.omit()
+
+# Median split (HCC only)
+cut_hcc <- median(os_hcc$CMA_score, na.rm = TRUE)
+
+km_df <- os_hcc |>
+  mutate(CMA = factor(ifelse(CMA_score >= cut_hcc, "High", "Low"),
+                      levels = c("Low","High"))) |>
+  select(Time = time_months, Event = event, CMA)
+
+fit <- survfit(Surv(Time, Event) ~ CMA, data = km_df)
+
+ggsurvplot(fit, data = km_df,
+           risk.table = TRUE, pval = TRUE, conf.int = TRUE,
+           legend.labs = c("Low CMA","High CMA"),
+           xlab = "Months", ylab = "Survival probability",
+           title = "Overall survival by CMA (median split, HCC only)")
+
+print(summary(coxph(Surv(Time, Event) ~ CMA, data = km_df)))
+
+# Prism 3-column export (Months | Low CMA | High CMA)
+prism_threecol <- km_df %>%
+  transmute(
+    Months     = Time,
+    `Low CMA`  = ifelse(CMA == "Low",  Event, NA),
+    `High CMA` = ifelse(CMA == "High", Event, NA)
+  ) %>%
+  arrange(Months)
+
+write.csv(prism_threecol, "Prism_OS_threecol.csv", row.names = FALSE, na = "")
+
+
+# 2) Small tumors only: CMA (High vs Low) and OS
+#    (group3 = Control / Small / Large; cma_df3 from tumor-size script)
+
+stopifnot(exists("group3"), exists("cma_df3"))
+
+# Re-use samples, time_os, event_os defined above
+is_small <- group3 == "Small"
+
+os_small <- data.frame(
+  Sample      = samples[is_small],
+  time_months = time_os[is_small],
+  event       = event_os[is_small],
+  CMA_score   = cma_df3$CMA_score[match(samples[is_small], cma_df3$Sample)]
+) |>
+  na.omit()
+
+# Median split within small tumors
+cut_small <- median(os_small$CMA_score, na.rm = TRUE)
+
+km_df_small <- os_small |>
+  mutate(CMA = factor(ifelse(CMA_score >= cut_small, "High", "Low"),
+                      levels = c("Low","High"))) |>
+  select(Time = time_months, Event = event, CMA)
+
+fit_small <- survfit(Surv(Time, Event) ~ CMA, data = km_df_small)
+
+ggsurvplot(fit_small, data = km_df_small,
+           risk.table = TRUE, pval = TRUE, conf.int = TRUE,
+           legend.labs = c("Low CMA","High CMA"),
+           xlab = "Months", ylab = "Overall survival probability",
+           title = "Overall survival in SMALL HCC by CMA (median split)")
+
+print(summary(coxph(Surv(Time, Event) ~ CMA, data = km_df_small)))
+
+# Prism 3-column export for small tumors
+prism_threecol_small <- km_df_small %>%
+  transmute(
+    Months     = Time,
+    `Low CMA`  = ifelse(CMA == "Low",  Event, NA),
+    `High CMA` = ifelse(CMA == "High", Event, NA)
+  ) %>%
+  arrange(Months)
+
+write.csv(prism_threecol_small, "Prism_OS_threecol_SMALL.csv", row.names = FALSE, na = "")
+
+
