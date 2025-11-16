@@ -20,6 +20,12 @@ CMA_GENES <- list(
 )
 CMA_GENE_ORDER <- unlist(CMA_GENES, use.names = FALSE)
 
+# Demographics table (used for tumor size, sex, and survival)
+demo <- read_excel(
+  "data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
+  col_types = "text"
+)
+
 # Non-tumor vs tumor CMA score
 
 # Load GEO series GSE14520 and pull GPL3921
@@ -171,8 +177,6 @@ write.csv(exprs_cma_z_hm,
 
 # CMA vs tumor size (Control / small / large) 
 
-demo <- read_excel("data/GSE14520_Extra_Supplement_patients_demographics.xlsx")
-
 demo_clean <- demo %>%
   transmute(
     GSM           = as.character(`Affy_GSM`),
@@ -241,7 +245,7 @@ write.csv(exprs_cma_z_ord,
 # LAMP2 / STAG2 expression in Control vs Small tumors
 
 # Keep probe-level matrix aligned with gene-level samples
-exprs_valid <- exprs_valid[, colnames(exprs_genelevel), drop = FALSE]
+exprs_valid <- exprs_valid[, colnames(exprs_genelevel)]
 stopifnot(identical(colnames(exprs_valid), colnames(exprs_genelevel)))
 
 lamp2_probes <- c("200821_at", "203042_at")
@@ -302,11 +306,6 @@ write.csv(gene_df2,
 
 
 # Sex-stratified CMA scores 
-
-demo <- read_excel(
-  "data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
-  col_types = "text"
-)
 
 lcs2sex <- demo %>%
   transmute(
@@ -436,11 +435,6 @@ write.csv(exprs_m,
 
 
 # Overall survival vs CMA 
-
-demo <- read_excel(
-  "data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
-  col_types = "text"
-)
 
 samples <- colnames(exprs_genelevel)
 is_hcc  <- group == "HCC"
