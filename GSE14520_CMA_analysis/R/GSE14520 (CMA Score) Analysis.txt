@@ -4,9 +4,13 @@
 # Packages 
 library(GEOquery)
 library(matrixStats)
+library(stringr)
 library(dplyr)
 library(ggplot2)
 library(pheatmap)
+library(readxl)
+library(survival)
+library(survminer)
 
 # Load GEO series GSE14520 
 GSE14520 <- getGEO("GSE14520", GSEMatrix = TRUE, AnnotGPL = TRUE)
@@ -173,13 +177,17 @@ write.csv(exprs_cma_z, "CMA_heatmap_values_for_Prism.csv", row.names = TRUE)
 # Description: CMA score analysis stratified by tumor size (Control, small, large) and differential expression of LAMP2 and STAG2 in control vs small tumors using GSE14520 (GPL3921).
 
 # Patient demographics Excel
-library(readxl)
 demo <- read_excel("data/GSE14520_Extra_Supplement_patients_demographics.xlsx")
 
 demo_clean <- demo %>%
   transmute(
-    GSM = as.character(`Affy_GSM`),
-    TumorSize = tolower(`Main Tumor Size (>/<=5 cm)`)  # "small" / "large"
+    GSM          = as.character(`Affy_GSM`),
+    TumorSize_raw = tolower(`Main Tumor Size (>/<=5 cm)`),
+    TumorSize     = case_when(
+      TumorSize_raw %in% c("small", "<=5 cm", "<=5cm", "≤5cm") ~ "small",
+      TumorSize_raw %in% c("large", ">5 cm", ">5cm")           ~ "large",
+      TRUE                                                     ~ NA_character_
+    )
   )
 
 gsm_ids <- colnames(exprs_genelevel)
@@ -291,7 +299,6 @@ wilcox.test(LAMP2 ~ Group3, data = gene_df2)
 wilcox.test(STAG2 ~ Group3, data = gene_df2)
 
 # Boxplots 
-library(ggplot2)
 gene_df2_long <- tidyr::pivot_longer(
   gene_df2, cols = c(LAMP2, STAG2),
   names_to = "Gene", values_to = "Expression"
@@ -318,9 +325,6 @@ write.csv(gene_df2, "STAG2_LAMP2_Control_vs_Small_FC.csv", row.names = FALSE)
 # Description: Sex-stratified CMA score analysis using the GSE14520 (GPL3921).
 
 # LCS ID and Sex (from demographics)
-library(readxl)
-library(stringr)
-library(dplyr)
 
 demo <- read_excel("data/GSE14520_Extra_Supplement_patients_demographics.xlsx",
                    col_types = "text")
@@ -332,10 +336,16 @@ lcs2sex <- demo %>%
   )
 
 # Extract LCS 
-if (!exists("ph_txt")) {
-  txtcols <- grep("characteristics|source_name|title", colnames(pheno), ignore.case = TRUE, value = TRUE)
-  ph_txt <- apply(pheno[, txtcols, drop = FALSE], 1, function(x) paste(na.omit(x), collapse = "; "))
-}
+txtcols <- grep("characteristics|source_name|title",
+                colnames(pheno),
+                ignore.case = TRUE,
+                value = TRUE)
+
+ph_txt <- apply(
+  pheno[, txtcols, drop = FALSE],
+  1,
+  function(x) paste(na.omit(x), collapse = "; ")
+)
 
 lcs_token <- stringr::str_extract(ph_txt, "LCS[ _-]?\\d+[A-B]?")  # e.g., "LCS_193A"
 lcs_norm  <- ifelse(is.na(lcs_token), NA, paste0("LCS_", stringr::str_extract(lcs_token, "\\d+")))
@@ -378,7 +388,6 @@ cma_df_f <- data.frame(
 
 # Stats + plot
 wilcox.test(CMA_score ~ Group, data = cma_df_f, exact = FALSE)
-library(ggplot2)
 ggplot(cma_df_f, aes(Group, CMA_score, fill = Group)) +
   geom_boxplot(outlier.shape = NA, width = 0.6) +
   geom_jitter(width = 0.15, alpha = 0.6, size = 1.5) +
@@ -425,12 +434,6 @@ write.csv(exprs_m, "CMA_heatmap_values_Male_Control_vs_HCC.csv", row.names = TRU
 
 # Part 4: 04_Survival_CMA
 # Description: Overall survival analysis stratified by CMA score (High vs. low) in HCC patients using GSE14520 (GPL3921).
-
-library(readxl)
-library(dplyr)
-library(survival)
-library(survminer)
-
 
 # Load demographics (overall survival metadata)
 demo <- read_excel(
